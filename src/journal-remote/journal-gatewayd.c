@@ -758,17 +758,86 @@ static int output_field_name(FILE *f, OutputMode m, const char *d) {
                 return fprintf(f, "%s\n", d);
 }
 
+static ssize_t request_reader_field_names(
+                void *cls,
+                uint64_t pos,
+                char *buf,
+                size_t max) {
+
+        RequestMeta *m = cls;
+        int r;
+        size_t n, k;
+
+        assert(m);
+        assert(buf);
+        assert(max > 0);
+        assert(pos >= m->delta);
+
+        pos -= m->delta;
+
+        while (pos >= m->size) {
+                off_t sz;
+                const char *d;
+
+                /* End of this field name, so let's serialize the next
+                 * one */
+                r = sd_journal_enumerate_fields(m->journal, &d);
+                if (r < 0) {
+                        log_error_errno(r, "Failed to advance field index: %m");
+                        return MHD_CONTENT_READER_END_WITH_ERROR;
+                } else if (r == 0)
+                        return MHD_CONTENT_READER_END_OF_STREAM;
+
+                pos -= m->size;
+                m->delta += m->size;
+
+                r = request_meta_ensure_tmp(m);
+                if (r < 0) {
+                        log_error_errno(r, "Failed to create temporary file: %m");
+                        return MHD_CONTENT_READER_END_WITH_ERROR;
+                }
+
+                r = output_field_name(m->tmp, m->mode, d);
+                if (r < 0) {
+                        log_error_errno(r, "Failed to serialize item: %m");
+                        return MHD_CONTENT_READER_END_WITH_ERROR;
+                }
+
+                sz = ftello(m->tmp);
+                if (sz == (off_t) -1) {
+                        log_error_errno(errno, "Failed to retrieve file position: %m");
+                        return MHD_CONTENT_READER_END_WITH_ERROR;
+                }
+
+                m->size = (uint64_t) sz;
+        }
+
+        if (fseeko(m->tmp, pos, SEEK_SET) < 0) {
+                log_error_errno(errno, "Failed to seek to position: %m");
+                return MHD_CONTENT_READER_END_WITH_ERROR;
+        }
+
+        n = m->size - pos;
+        if (n > max)
+                n = max;
+
+        errno = 0;
+        k = fread(buf, 1, n, m->tmp);
+        if (k != n) {
+                log_error("Failed to read from file: %s", errno != 0 ? strerror_safe(errno) : "Premature EOF");
+                return MHD_CONTENT_READER_END_WITH_ERROR;
+        }
+
+        return (ssize_t) k;
+}
+
 static int request_handler_field_names(
                 struct MHD_Connection *connection,
                 void *connection_cls) {
 
         _cleanup_(MHD_destroy_responsep) struct MHD_Response *response = NULL;
         RequestMeta *m = connection_cls;
-        int fd = -1;
-        FILE *tmp = NULL;
         int r;
-        off_t n;
-        const char *field;
 
         assert(connection);
         assert(m);
@@ -780,31 +849,15 @@ static int request_handler_field_names(
         if (request_parse_accept(m, connection) < 0)
                 return mhd_respond(connection, MHD_HTTP_BAD_REQUEST, "Failed to parse Accept header.");
 
-        fd = open_tmpfile_unlinkable("/tmp", O_RDWR|O_CLOEXEC);
-        if (fd < 0)
-                return mhd_respondf(connection, r, MHD_HTTP_INTERNAL_SERVER_ERROR, "Failed to create temporary file: %m");
+        sd_journal_restart_fields(m->journal);
 
-        tmp = fdopen(fd, "w+");
-        if (!tmp)
-                return mhd_respondf(connection, r, MHD_HTTP_INTERNAL_SERVER_ERROR, "Failed to open temporary file: %m");
-
-        SD_JOURNAL_FOREACH_FIELD(m->journal, field) {
-                r = output_field_name(tmp, m->mode, field);
-                if (r < 0)
-                        return mhd_respondf(connection, r, MHD_HTTP_INTERNAL_SERVER_ERROR, "Failed to write to temporary file: %m");
-        }
-
-        n = ftello(tmp);
-        if (n == (off_t) -1)
-                return mhd_respondf(connection, r, MHD_HTTP_INTERNAL_SERVER_ERROR, "Failed to retrieve file position: %m");
-
-        rewind(tmp);
-        response = MHD_create_response_from_fd((size_t) n, fd);
+        response = MHD_create_response_from_callback(MHD_SIZE_UNKNOWN, 4*1024, request_reader_field_names, m, NULL);
         if (!response)
                 return respond_oom(connection);
-        TAKE_FD(fd);
 
-        MHD_add_response_header(response, "Content-Type", mime_types[m->mode == OUTPUT_JSON ? OUTPUT_JSON : OUTPUT_SHORT]);
+        if (MHD_add_response_header(response, "Content-Type", mime_types[m->mode == OUTPUT_JSON ? OUTPUT_JSON : OUTPUT_SHORT]) == MHD_NO)
+                return respond_oom(connection);
+
         return MHD_queue_response(connection, MHD_HTTP_OK, response);
 }
 
