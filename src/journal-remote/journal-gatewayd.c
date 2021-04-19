@@ -61,6 +61,10 @@ typedef struct RequestMeta {
 
         bool follow;
         bool discrete;
+
+        void *init_arg;
+        int (*init)(sd_journal *, void *);
+        long unsigned int (*iterator)(void *);
 } RequestMeta;
 
 static const char* const mime_types[_OUTPUT_MODE_MAX] = {
@@ -136,137 +140,80 @@ static int request_meta_ensure_tmp(RequestMeta *m) {
 
         return 0;
 }
-
-static ssize_t request_reader_entries(
-                void *cls,
-                uint64_t pos,
-                char *buf,
-                size_t max) {
-
-        RequestMeta *m = cls;
+static long unsigned int entries_iterator(void *cls) {
         int r;
-        size_t n, k;
+        RequestMeta *m = cls;
 
-        assert(m);
-        assert(buf);
-        assert(max > 0);
-        assert(pos >= m->delta);
 
-        pos -= m->delta;
+        if (m->n_entries_set &&
+            m->n_entries <= 0)
+                return MHD_CONTENT_READER_END_OF_STREAM;
 
-        while (pos >= m->size) {
-                off_t sz;
+        if (m->n_skip < 0)
+                r = sd_journal_previous_skip(m->journal, (uint64_t) -m->n_skip + 1);
+        else if (m->n_skip > 0)
+                r = sd_journal_next_skip(m->journal, (uint64_t) m->n_skip + 1);
+        else
+                r = sd_journal_next(m->journal);
 
-                /* End of this entry, so let's serialize the next
-                 * one */
+        if (r < 0) {
+                log_error_errno(r, "Failed to advance journal pointer: %m");
+                return MHD_CONTENT_READER_END_WITH_ERROR;
+        } else if (r == 0) {
 
-                if (m->n_entries_set &&
-                    m->n_entries <= 0)
-                        return MHD_CONTENT_READER_END_OF_STREAM;
-
-                if (m->n_skip < 0)
-                        r = sd_journal_previous_skip(m->journal, (uint64_t) -m->n_skip + 1);
-                else if (m->n_skip > 0)
-                        r = sd_journal_next_skip(m->journal, (uint64_t) m->n_skip + 1);
-                else
-                        r = sd_journal_next(m->journal);
-
-                if (r < 0) {
-                        log_error_errno(r, "Failed to advance journal pointer: %m");
-                        return MHD_CONTENT_READER_END_WITH_ERROR;
-                } else if (r == 0) {
-
-                        if (m->follow) {
-                                r = sd_journal_wait(m->journal, (uint64_t) JOURNAL_WAIT_TIMEOUT);
-                                if (r < 0) {
-                                        log_error_errno(r, "Couldn't wait for journal event: %m");
-                                        return MHD_CONTENT_READER_END_WITH_ERROR;
-                                }
-                                if (r == SD_JOURNAL_NOP)
-                                        break;
-
-                                continue;
-                        }
-
-                        return MHD_CONTENT_READER_END_OF_STREAM;
-                }
-
-                if (m->discrete) {
-                        assert(m->cursor);
-
-                        r = sd_journal_test_cursor(m->journal, m->cursor);
+                if (m->follow) {
+                        r = sd_journal_wait(m->journal, (uint64_t) JOURNAL_WAIT_TIMEOUT);
                         if (r < 0) {
-                                log_error_errno(r, "Failed to test cursor: %m");
+                                log_error_errno(r, "Couldn't wait for journal event: %m");
                                 return MHD_CONTENT_READER_END_WITH_ERROR;
                         }
+                        if (r == SD_JOURNAL_NOP)
+                                return 0;
 
-                        if (r == 0)
-                                return MHD_CONTENT_READER_END_OF_STREAM;
+                        return entries_iterator(m);
                 }
 
-                if (m->until_set) {
-                        usec_t usec;
-
-                        r = sd_journal_get_realtime_usec(m->journal, &usec);
-                        if (r < 0) {
-                                log_error_errno(r, "Failed to determine timestamp: %m");
-                                return MHD_CONTENT_READER_END_WITH_ERROR;
-                        }
-                        if (usec > m->until)
-                                return MHD_CONTENT_READER_END_OF_STREAM;
-                }
-                pos -= m->size;
-                m->delta += m->size;
-
-                if (m->n_entries_set)
-                        m->n_entries -= 1;
-
-                m->n_skip = 0;
-
-                r = request_meta_ensure_tmp(m);
-                if (r < 0) {
-                        log_error_errno(r, "Failed to create temporary file: %m");
-                        return MHD_CONTENT_READER_END_WITH_ERROR;
-                }
-
-                r = show_journal_entry(m->tmp, m->journal, m->mode, 0, OUTPUT_FULL_WIDTH,
-                                   NULL, NULL, NULL);
-                if (r < 0) {
-                        log_error_errno(r, "Failed to serialize item: %m");
-                        return MHD_CONTENT_READER_END_WITH_ERROR;
-                }
-
-                sz = ftello(m->tmp);
-                if (sz == (off_t) -1) {
-                        log_error_errno(errno, "Failed to retrieve file position: %m");
-                        return MHD_CONTENT_READER_END_WITH_ERROR;
-                }
-
-                m->size = (uint64_t) sz;
+                return MHD_CONTENT_READER_END_OF_STREAM;
         }
 
-        if (m->tmp == NULL && m->follow)
-                return 0;
+        if (m->discrete) {
+                assert(m->cursor);
 
-        if (fseeko(m->tmp, pos, SEEK_SET) < 0) {
-                log_error_errno(errno, "Failed to seek to position: %m");
+                r = sd_journal_test_cursor(m->journal, m->cursor);
+                if (r < 0) {
+                        log_error_errno(r, "Failed to test cursor: %m");
+                        return MHD_CONTENT_READER_END_WITH_ERROR;
+                }
+
+                if (r == 0)
+                        return MHD_CONTENT_READER_END_OF_STREAM;
+        }
+
+        if (m->until_set) {
+                usec_t usec;
+
+                r = sd_journal_get_realtime_usec(m->journal, &usec);
+                if (r < 0) {
+                        log_error_errno(r, "Failed to determine timestamp: %m");
+                        return MHD_CONTENT_READER_END_WITH_ERROR;
+                }
+                if (usec > m->until)
+                        return MHD_CONTENT_READER_END_OF_STREAM;
+        }
+
+        if (m->n_entries_set)
+                m->n_entries -= 1;
+
+        m->n_skip = 0;
+
+        r = show_journal_entry(m->tmp, m->journal, m->mode, 0, OUTPUT_FULL_WIDTH,
+                                NULL, NULL, NULL);
+        if (r < 0) {
+                log_error_errno(r, "Failed to serialize item: %m");
                 return MHD_CONTENT_READER_END_WITH_ERROR;
         }
 
-        n = m->size - pos;
-        if (n < 1)
-                return 0;
-        if (n > max)
-                n = max;
-
-        errno = 0;
-        k = fread(buf, 1, n, m->tmp);
-        if (k != n) {
-                log_error("Failed to read from file: %s", errno != 0 ? strerror_safe(errno) : "Premature EOF");
-                return MHD_CONTENT_READER_END_WITH_ERROR;
-        }
-
-        return (ssize_t) k;
+        return 1;
 }
 
 static int request_parse_accept(
@@ -561,20 +508,34 @@ static int request_parse_arguments(
         return m->argument_parse_error;
 }
 
-static int request_handler_entries(
+static int entries_init_by_cursor(sd_journal *journal, void *search) {
+        const char *cursor = search;
+
+        return sd_journal_seek_cursor(journal, cursor);
+}
+
+static int entries_init_by_realtime(sd_journal *journal, void *search) {
+        usec_t *realtime = search;
+
+        return sd_journal_seek_realtime_usec(journal, *realtime);
+}
+
+static int entries_init_head(sd_journal *journal, void *search) {
+        return sd_journal_seek_head(journal);
+}
+
+static int entries_init_tail(sd_journal *journal, void *search) {
+        return sd_journal_seek_tail(journal);
+}
+
+static int entries_init_default(sd_journal *journal, void *search) {
+        return 0;
+}
+
+static int entries_prepare_init(
                 struct MHD_Connection *connection,
                 void *connection_cls) {
-
-        _cleanup_(MHD_destroy_responsep) struct MHD_Response *response = NULL;
         RequestMeta *m = connection_cls;
-        int r;
-
-        assert(connection);
-        assert(m);
-
-        r = open_journal(m);
-        if (r < 0)
-                return mhd_respondf(connection, r, MHD_HTTP_INTERNAL_SERVER_ERROR, "Failed to open journal: %m");
 
         if (request_parse_accept(m, connection) < 0)
                 return mhd_respond(connection, MHD_HTTP_BAD_REQUEST, "Failed to parse Accept header.");
@@ -594,29 +555,23 @@ static int request_handler_entries(
                 m->n_entries_set = true;
         }
 
-        if (m->cursor)
-                r = sd_journal_seek_cursor(m->journal, m->cursor);
-        else if (m->since_set && m->n_skip >= 0)
-                r = sd_journal_seek_realtime_usec(m->journal, m->since);
-        else if (m->n_skip >= 0)
-                r = sd_journal_seek_head(m->journal);
-        else if (m->until_set && m->n_skip < 0)
-                r = sd_journal_seek_realtime_usec(m->journal, m->until);
-        else if (m->n_skip < 0)
-                r = sd_journal_seek_tail(m->journal);
+        if (m->cursor) {
+                m->init_arg = m->cursor;
+                m->init = entries_init_by_cursor;
+        } else if (m->since_set && m->n_skip >= 0) {
+                m->init_arg = &m->since;
+                m->init = entries_init_by_realtime;
+        } else if (m->n_skip >= 0)
+                m->init = entries_init_head;
+        else if (m->until_set && m->n_skip < 0) {
+                m->init_arg = &m->since;
+                m->init = entries_init_by_realtime;
+        } else if (m->n_skip < 0)
+                m->init = entries_init_tail;
         else
-                r = 0;
-        if (r < 0)
-                return mhd_respond(connection, MHD_HTTP_BAD_REQUEST, "Failed to seek in journal.");
+                m->init = entries_init_default;
 
-        response = MHD_create_response_from_callback(MHD_SIZE_UNKNOWN, 4*1024, request_reader_entries, m, NULL);
-        if (!response)
-                return respond_oom(connection);
-
-        if (MHD_add_response_header(response, "Content-Type", mime_types[m->mode]) == MHD_NO)
-                return respond_oom(connection);
-
-        return MHD_queue_response(connection, MHD_HTTP_OK, response);
+        return 0;
 }
 
 static int output_field(FILE *f, OutputMode m, const char *d, size_t l) {
@@ -641,7 +596,39 @@ static int output_field(FILE *f, OutputMode m, const char *d, size_t l) {
         return 0;
 }
 
-static ssize_t request_reader_fields(
+static long unsigned int field_iterator(void *cls) {
+        int r;
+        const void *d;
+        size_t l;
+        RequestMeta *m = cls;
+
+        r = sd_journal_enumerate_unique(m->journal, &d, &l);
+        if (r < 0) {
+                log_error_errno(r, "Failed to advance field index: %m");
+                return MHD_CONTENT_READER_END_WITH_ERROR;
+        } else if (r == 0)
+                return MHD_CONTENT_READER_END_OF_STREAM;
+
+        r = output_field(m->tmp, m->mode, d, l);
+        if (r < 0) {
+                log_error_errno(r, "Failed to serialize item: %m");
+                return MHD_CONTENT_READER_END_WITH_ERROR;
+        }
+
+        return 1;
+}
+
+static int field_name_init(sd_journal *journal, void *search) {
+        sd_journal_restart_fields(journal);
+        return 0;
+}
+
+static int fields_init(sd_journal *journal, void *search) {
+        const char *s = search;
+        return sd_journal_query_unique(journal, s);
+}
+
+static ssize_t request_reader_generic(
                 void *cls,
                 uint64_t pos,
                 char *buf,
@@ -660,21 +647,6 @@ static ssize_t request_reader_fields(
 
         while (pos >= m->size) {
                 off_t sz;
-                const void *d;
-                size_t l;
-
-                /* End of this field, so let's serialize the next
-                 * one */
-
-                r = sd_journal_enumerate_unique(m->journal, &d, &l);
-                if (r < 0) {
-                        log_error_errno(r, "Failed to advance field index: %m");
-                        return MHD_CONTENT_READER_END_WITH_ERROR;
-                } else if (r == 0)
-                        return MHD_CONTENT_READER_END_OF_STREAM;
-
-                pos -= m->size;
-                m->delta += m->size;
 
                 r = request_meta_ensure_tmp(m);
                 if (r < 0) {
@@ -682,20 +654,28 @@ static ssize_t request_reader_fields(
                         return MHD_CONTENT_READER_END_WITH_ERROR;
                 }
 
-                r = output_field(m->tmp, m->mode, d, l);
-                if (r < 0) {
-                        log_error_errno(r, "Failed to serialize item: %m");
-                        return MHD_CONTENT_READER_END_WITH_ERROR;
-                }
+                /* End of this field, so let's serialize the next
+                 * one */
 
-                sz = ftello(m->tmp);
-                if (sz == (off_t) -1) {
-                        log_error_errno(errno, "Failed to retrieve file position: %m");
-                        return MHD_CONTENT_READER_END_WITH_ERROR;
-                }
+                r = m->iterator(m);
+                if (r < 0)
+                        return r;
+                else if (r > 0) {
+                        pos -= m->size;
+                        m->delta += m->size;
 
-                m->size = (uint64_t) sz;
+                        sz = ftello(m->tmp);
+                        if (sz == (off_t) -1) {
+                                log_error_errno(errno, "Failed to retrieve file position: %m");
+                                return MHD_CONTENT_READER_END_WITH_ERROR;
+                        }
+
+                        m->size = (uint64_t) sz;
+                }
         }
+
+        if (m->tmp == NULL && m->follow)
+                return 0;
 
         if (fseeko(m->tmp, pos, SEEK_SET) < 0) {
                 log_error_errno(errno, "Failed to seek to position: %m");
@@ -716,39 +696,6 @@ static ssize_t request_reader_fields(
         return (ssize_t) k;
 }
 
-static int request_handler_fields(
-                struct MHD_Connection *connection,
-                const char *field,
-                void *connection_cls) {
-
-        _cleanup_(MHD_destroy_responsep) struct MHD_Response *response = NULL;
-        RequestMeta *m = connection_cls;
-        int r;
-
-        assert(connection);
-        assert(m);
-
-        r = open_journal(m);
-        if (r < 0)
-                return mhd_respondf(connection, r, MHD_HTTP_INTERNAL_SERVER_ERROR, "Failed to open journal: %m");
-
-        if (request_parse_accept(m, connection) < 0)
-                return mhd_respond(connection, MHD_HTTP_BAD_REQUEST, "Failed to parse Accept header.");
-
-        r = sd_journal_query_unique(m->journal, field);
-        if (r < 0)
-                return mhd_respond(connection, MHD_HTTP_BAD_REQUEST, "Failed to query unique fields.");
-
-        response = MHD_create_response_from_callback(MHD_SIZE_UNKNOWN, 4*1024, request_reader_fields, m, NULL);
-        if (!response)
-                return respond_oom(connection);
-
-        if (MHD_add_response_header(response, "Content-Type", mime_types[m->mode == OUTPUT_JSON ? OUTPUT_JSON : OUTPUT_SHORT]) == MHD_NO)
-                return respond_oom(connection);
-
-        return MHD_queue_response(connection, MHD_HTTP_OK, response);
-}
-
 static int output_field_name(FILE *f, OutputMode m, const char *d) {
         if (m == OUTPUT_JSON)
                 return fprintf(f, "{ \"field\" : \"%s\" }\n", d);
@@ -756,17 +703,34 @@ static int output_field_name(FILE *f, OutputMode m, const char *d) {
                 return fprintf(f, "%s\n", d);
 }
 
-static int request_handler_field_names(
+static long unsigned int field_name_iterator(void *cls) {
+        int r;
+        const char *d;
+        RequestMeta *m = cls;
+
+        r = sd_journal_enumerate_fields(m->journal, &d);
+        if (r < 0) {
+                log_error_errno(r, "Failed to advance field index: %m");
+                return MHD_CONTENT_READER_END_WITH_ERROR;
+        } else if (r == 0)
+                return MHD_CONTENT_READER_END_OF_STREAM;
+
+        r = output_field_name(m->tmp, m->mode, d);
+        if (r < 0) {
+                log_error_errno(r, "Failed to serialize item: %m");
+                return MHD_CONTENT_READER_END_WITH_ERROR;
+        }
+
+        return 1;
+}
+
+static int request_handler_generic(
                 struct MHD_Connection *connection,
                 void *connection_cls) {
 
         _cleanup_(MHD_destroy_responsep) struct MHD_Response *response = NULL;
         RequestMeta *m = connection_cls;
-        int fd = -1;
-        FILE *tmp = NULL;
         int r;
-        off_t n;
-        const char *field;
 
         assert(connection);
         assert(m);
@@ -778,31 +742,17 @@ static int request_handler_field_names(
         if (request_parse_accept(m, connection) < 0)
                 return mhd_respond(connection, MHD_HTTP_BAD_REQUEST, "Failed to parse Accept header.");
 
-        fd = open_tmpfile_unlinkable("/tmp", O_RDWR|O_CLOEXEC);
-        if (fd < 0)
-                return mhd_respondf(connection, r, MHD_HTTP_INTERNAL_SERVER_ERROR, "Failed to create temporary file: %m");
+        r = m->init(m->journal, m->init_arg);
+        if (r < 0)
+                return mhd_respond(connection, MHD_HTTP_BAD_REQUEST, "Failed to execute query");
 
-        tmp = fdopen(fd, "w+");
-        if (!tmp)
-                return mhd_respondf(connection, r, MHD_HTTP_INTERNAL_SERVER_ERROR, "Failed to open temporary file: %m");
-
-        SD_JOURNAL_FOREACH_FIELD(m->journal, field) {
-                r = output_field_name(tmp, m->mode, field);
-                if (r < 0)
-                        return mhd_respondf(connection, r, MHD_HTTP_INTERNAL_SERVER_ERROR, "Failed to write to temporary file: %m");
-        }
-
-        n = ftello(tmp);
-        if (n == (off_t) -1)
-                return mhd_respondf(connection, r, MHD_HTTP_INTERNAL_SERVER_ERROR, "Failed to retrieve file position: %m");
-
-        rewind(tmp);
-        response = MHD_create_response_from_fd((size_t) n, fd);
+        response = MHD_create_response_from_callback(MHD_SIZE_UNKNOWN, 4*1024, request_reader_generic, m, NULL);
         if (!response)
                 return respond_oom(connection);
-        TAKE_FD(fd);
 
-        MHD_add_response_header(response, "Content-Type", mime_types[m->mode == OUTPUT_JSON ? OUTPUT_JSON : OUTPUT_SHORT]);
+        if (MHD_add_response_header(response, "Content-Type", mime_types[m->mode]) == MHD_NO)
+                return respond_oom(connection);
+
         return MHD_queue_response(connection, MHD_HTTP_OK, response);
 }
 
@@ -975,6 +925,7 @@ static mhd_result request_handler(
                 size_t *upload_data_size,
                 void **connection_cls) {
         int r, code;
+        RequestMeta *m = *connection_cls;
 
         assert(connection);
         assert(connection_cls);
@@ -999,14 +950,26 @@ static mhd_result request_handler(
         if (streq(url, "/"))
                 return request_handler_redirect(connection, "./browse");
 
-        if (streq(url, "/entries"))
-                return request_handler_entries(connection, *connection_cls);
+        if (streq(url, "/entries")) {
+                r = entries_prepare_init(connection, *connection_cls);
+                if (r < 0)
+                        return r;
+                m->iterator = entries_iterator;
+                return request_handler_generic(connection, *connection_cls);
+        }
 
-        if (streq(url, "/fields"))
-                return request_handler_field_names(connection, *connection_cls);
+        if (streq(url, "/fields")) {
+                m->init = field_name_init;
+                m->iterator = field_name_iterator;
+                return request_handler_generic(connection, *connection_cls);
+        }
 
-        if (startswith(url, "/fields/"))
-                return request_handler_fields(connection, url + 8, *connection_cls);
+        if (startswith(url, "/fields/")) {
+                m->init = fields_init;
+                m->init_arg = (char *) url + 8;
+                m->iterator = field_iterator;
+                return request_handler_generic(connection, *connection_cls);
+        }
 
         if (streq(url, "/browse"))
                 return request_handler_file(connection, DOCUMENT_ROOT "/browse.html", "text/html");
