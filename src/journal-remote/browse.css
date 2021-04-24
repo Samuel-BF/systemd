@@ -1,0 +1,185 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
+
+body {
+        background-color: #ededed;
+        color: #313739;
+        font: message-box;
+        margin: 3em;
+}
+div#divlogs, table#details {
+        font-family: monospace;
+        font-size: 7pt;
+        background-color: #ffffff;
+        padding: 1em;
+        margin: 2em 0em;
+        border-radius: 10px 10px 10px 10px;
+        border: 1px solid threedshadow;
+        overflow-x: scroll;
+        min-height: 3.5em;
+        width: 100%;
+        box-sizing: border-box;
+}
+table#tablelogs, table#details {
+        border-collapse: collapse;
+}
+table#tablelogs {
+        white-space: pre;
+}
+table#details {
+        white-space: pre-wrap;
+        display: none;
+}
+#tablelogs td, #details td {
+        border-left: 1px dotted lightgrey;
+        padding: 0 5px;
+}
+#tablelogs td.timestamp, #details tr td:first-child {
+        text-align: right;
+        border-left-width: 0;
+}
+#tablelogs td.message-error {
+        color: red;
+        font-weight: bold;
+}
+#tablelogs td.message-highlight {
+        font-weight: bold;
+}
+#tablelogs input[type="checkbox"]:checked ~ td {
+        background-color: #ddd;
+}
+#details tr:nth-child(even) {
+        background-color: #ededed
+}
+div#keynav {
+        text-align: center;
+        font-size: 7pt;
+        color: #818789;
+        padding-top: 2em;
+}
+span.key {
+        font-weight: bold;
+        color: #313739;
+}
+div#buttonnav {
+        text-align: center;
+}
+#buttonnav button {
+        font-size: 18pt;
+        font-weight: bold;
+        width: 2em;
+        height: 2em;
+}
+input, input[type=checkbox].includeexclude + span {
+        border: 0;
+        background: none;
+        border-bottom: #999 2px dashed;
+}
+input:focus, input[type=checkbox].includeexclude:active + span {
+        border-color: #000;
+}
+input[type=checkbox] {
+        display: none;
+}
+input[type=checkbox].includeexclude + span::before {
+        content: "=";
+        margin: 0 0.5em;
+        font-weight: bold;
+        color: #f00;
+}
+input[type=checkbox].includeexclude:checked + span::before {
+        content: "≠";
+}
+input[name=follow] + button#followbtn::before {
+        content: "\25B6";
+}
+input[name=follow]:checked + button#followbtn::before {
+        content: "\25AE\25AE";
+        font-stretch: extra-condensed;
+}
+input[name=follow]:checked + button#followbtn ~ button {
+        opacity: 0.5;
+}
+input[type=number] {
+        font-weight: bold;
+        background: none;
+        width: 6em;
+        text-align: center;
+        appearance: textfield;
+}
+input[name=lines] {
+        width: 3em;
+}
+#filters select {
+        background: none;
+        appearance: none;
+        border: 0;
+        width: 2em;
+        padding: 0 0.5em;
+}
+#filters input[name=MESSAGE] {
+        width: 50em;
+}
+#filters input {
+        margin: 0 10px;
+}
+.errorbox {
+        display: none;
+        border-radius: 10px 10px 10px 10px;
+        border: 1px solid #f00;
+        background-color: #faa;
+        text-align: center;
+        margin-top: 10px;
+}
+a {
+        color: #313739;
+}
+button.icon {
+        opacity: 0;
+        margin: 0;
+        border: 0;
+        background: none;
+}
+#filters p:hover > .icon, .filtervalue:hover .icon, #details div:hover > .icon, #details td:hover > .icon {
+        opacity: 1;
+}
+#details .icon {
+        padding: 0;
+        padding-left: 0.4em;
+}
+#details .icon + .icon {
+        padding-left: 0;
+}
+.remove {
+        font-weight: bold;
+        color: #f00;
+}
+#filters .filtervalue .icon {
+        padding: 0.2em;
+}
+#filters .filtervalue {
+        font-weight: bold;
+        padding-left: 0.7em;
+        display: inline-block;
+}
+.selected {
+        font-weight: bold;
+}
+@keyframes swirling {
+        0% { transform: rotate(0deg); transform-origin: 8px 18px; }
+        100% { transform: rotate(360deg); transform-origin: 8px 18px; }
+}
+#loading_arrow {
+        font-weight: bold;
+        color: threedshadow;
+        font-size: 25px;
+        float: right;
+        animation-name: swirling;
+        animation-duration: 2s;
+        animation-iteration-count: infinite;
+        animation-timing-function: linear;
+        width: 15px;
+        margin-top: -10px;
+        margin-right: 10px;
+        display: inline-block;
+        height: 0;
+}

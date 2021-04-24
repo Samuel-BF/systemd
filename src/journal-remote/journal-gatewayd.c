@@ -859,7 +859,8 @@ static int request_handler_file(
                 return respond_oom(connection);
         TAKE_FD(fd);
 
-        if (MHD_add_response_header(response, "Content-Type", mime_type) == MHD_NO)
+        if (MHD_add_response_header(response, "Content-Type", mime_type) == MHD_NO ||
+            MHD_add_response_header(response, "Content-Security-Policy", "default-src 'none'; navigate-to 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self';") == MHD_NO)
                 return respond_oom(connection);
 
         return MHD_queue_response(connection, MHD_HTTP_OK, response);
@@ -1013,6 +1014,12 @@ static mhd_result request_handler(
 
         if (streq(url, "/browse"))
                 return request_handler_file(connection, DOCUMENT_ROOT "/browse.html", "text/html");
+
+        if (streq(url, "/browse.css"))
+                return request_handler_file(connection, DOCUMENT_ROOT "/browse.css", "text/css");
+
+        if (streq(url, "/browse.js"))
+                return request_handler_file(connection, DOCUMENT_ROOT "/browse.js", "application/javascript");
 
         if (streq(url, "/favicon.svg"))
                 return request_handler_file(connection, DOCUMENT_ROOT "/favicon.svg", "image/svg+xml");
